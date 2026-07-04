@@ -1,0 +1,14 @@
+config acme
+	option account_email "op://Private/Cloudflare Account API Token - public-dns.acme DNS/email"
+	option debug '0'
+
+config cert 'public_dns'
+	option enabled '1'
+	option staging '0'
+	option key_type 'ec256'
+	option validation_method 'dns'
+	option dns 'dns_cf'
+	list domains "op://Private/Cloudflare Account API Token - public-dns.acme DNS/username"
+	list credentials 'CF_Token="op://Private/Cloudflare Account API Token - public-dns.acme DNS/password"'
+	list credentials 'CF_Account_ID="op://Private/Cloudflare Account API Token - public-dns.acme DNS/Account ID"'
+	list credentials 'CF_Zone_ID="op://Private/Cloudflare Account API Token - public-dns.acme DNS/Zone ID"'

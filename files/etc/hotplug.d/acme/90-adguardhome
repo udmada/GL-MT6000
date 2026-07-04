@@ -1,0 +1,30 @@
+# Deploy freshly issued/renewed Let's Encrypt certificate to AdGuard Home.
+# Fired by acme-common via hotplug-call with ACTION and the cert's
+# main_domain in the environment.
+
+[ "$ACTION" = "issued" ] || [ "$ACTION" = "renewed" ] || exit 0
+[ -n "$main_domain" ] || exit 0
+
+AGH_CERT_DIR="/etc/adguardhome/letsencrypt/live/${main_domain}"
+
+mkdir -p "$AGH_CERT_DIR"
+# Copy (dereferencing the /etc/ssl/acme symlinks) instead of symlinking:
+# real files survive sysupgrade config restores and keep AdGuard Home
+# working even if /etc/acme state is ever lost.
+cp -fL "/etc/ssl/acme/${main_domain}.fullchain.crt" "$AGH_CERT_DIR/fullchain.pem"
+cp -fL "/etc/ssl/acme/${main_domain}.key" "$AGH_CERT_DIR/privkey.pem"
+chmod 600 "$AGH_CERT_DIR/fullchain.pem" "$AGH_CERT_DIR/privkey.pem"
+
+# AdGuard Home runs as the unprivileged adguardhome user and its cert tree
+# is 0700 — freshly created files/dirs must be handed over or AGH can't
+# read them.
+if id adguardhome >/dev/null 2>&1; then
+	chown -R adguardhome:adguardhome /etc/adguardhome/letsencrypt
+fi
+
+logger -t acme-deploy "Deployed ${main_domain} certificate to AdGuard Home ($ACTION)"
+
+if [ -x /etc/init.d/adguardhome ]; then
+	/etc/init.d/adguardhome restart
+	logger -t acme-deploy "AdGuard Home restarted to pick up new certificate"
+fi

@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+._*
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Router config backups (contain /etc/shadow, SSH host keys, certs — never commit)
+backup-*.tar.gz
