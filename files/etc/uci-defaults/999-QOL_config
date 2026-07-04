@@ -3,13 +3,13 @@ uci -q batch << EOI
 # Wireless radio0 specific settings
 set wireless.radio0.htmode='HE20'
 set wireless.radio0.channel='6'
-set wireless.radio0.country='SE'
+set wireless.radio0.country='NZ'
 set wireless.default_radio0.ieee80211w='2'
 
 # Wireless radio1 specific settings
 set wireless.radio1.htmode='HE80'
-set wireless.radio1.channel='48'
-set wireless.radio1.country='SE'
+set wireless.radio1.channel='100'
+set wireless.radio1.country='NZ'
 set wireless.default_radio1.ieee80211w='2'
 
 # Firewall settings
