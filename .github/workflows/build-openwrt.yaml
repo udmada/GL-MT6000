@@ -147,17 +147,57 @@ jobs:
           - **AdguardHome**
           - **REMOVED:** upnp, iptables, samba, usb storage..." --title "OpenWrt Custom Release for Flint 2 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
 
-      - name: Publish package feeds to feeds branch
+      - name: Prepare package feeds
         run: |
           # The image's distfeeds.list (generated from CONFIG_VERSION_REPO) defines
-          # the exact URLs the firmware will fetch — mirror the built packages to
-          # that location on the 'feeds' branch so apk works for this build's
-          # lifetime (including kmods, which match this exact kernel).
+          # the exact URLs the firmware will fetch — collect the built packages
+          # under that path and hand them to the publish job as an artifact.
           DISTFEEDS=$(find build_dir -path '*/root-*/etc/apk/repositories.d/distfeeds.list' | head -n1)
           [ -f "$DISTFEEDS" ] || { echo "distfeeds.list not found in build tree"; exit 1; }
           echo "--- generated distfeeds.list ---"; cat "$DISTFEEDS"
           BUILD_DIR_NAME=$(sed -n 's|.*/heads/feeds/\([^/]*\)/targets/.*|\1|p' "$DISTFEEDS" | head -n1)
           [ -n "$BUILD_DIR_NAME" ] || { echo "could not derive build dir name from distfeeds.list"; exit 1; }
+
+          # populate + index (and sign) the per-target package dir — buildbots
+          # run this; a plain 'make' does not
+          make package/index
+          TARGET_PKG_DIR=$(ls -d bin/targets/*/*/packages 2>/dev/null | head -n1)
+          [ -d "$TARGET_PKG_DIR" ] || { echo "target packages dir still missing after package/index:"; find bin -maxdepth 5 -type d; exit 1; }
+
+          # only the target feed points at this repo — the generated distfeeds
+          # keeps arch feeds (base/luci/packages/...) on official snapshots,
+          # so bin/packages does not need mirroring
+          mkdir -p "feeds_out/$BUILD_DIR_NAME/targets/mediatek/filogic"
+          cp -r "$TARGET_PKG_DIR" "feeds_out/$BUILD_DIR_NAME/targets/mediatek/filogic/"
+
+      - name: Upload package feeds artifact
+        uses: actions/upload-artifact@v7.0.0
+        with:
+          name: package-feeds
+          path: feeds_out/
+
+      - name: Clean up old releases
+        run: |
+          # '.[0:10][]' limits to the 10 most recent releases
+          gh api repos/${{ github.repository }}/releases | jq -r '.[10:][] | "\(.id) \(.tag_name)"' | while read id tag; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
+          done
+
+  publish_feeds:
+    name: Publish package feeds
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download package feeds artifact
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: package-feeds
+          path: feeds_out
+
+      - name: Push to feeds branch
+        run: |
+          BUILD_DIR_NAME=$(ls feeds_out | head -n1)
+          [ -n "$BUILD_DIR_NAME" ] || { echo "empty package-feeds artifact"; exit 1; }
 
           git clone --depth 1 --branch feeds "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" feeds_repo 2>/dev/null \
             || { mkdir feeds_repo && git -C feeds_repo init -b feeds; }
@@ -166,9 +206,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           rm -rf "$BUILD_DIR_NAME"
-          mkdir -p "$BUILD_DIR_NAME/targets/mediatek/filogic"
-          cp -r ../bin/targets/mediatek/filogic/packages "$BUILD_DIR_NAME/targets/mediatek/filogic/"
-          cp -r ../bin/packages "$BUILD_DIR_NAME/"
+          cp -r "../feeds_out/$BUILD_DIR_NAME" .
 
           # keep only the 3 most recent build dirs (they only serve the firmware
           # built alongside them — same lifetime as the releases)
@@ -182,10 +220,3 @@ jobs:
           git remote remove origin 2>/dev/null ||:
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           git push -f origin publish:feeds
-
-      - name: Clean up old releases
-        run: |
-          # '.[0:10][]' limits to the 10 most recent releases
-          gh api repos/${{ github.repository }}/releases | jq -r '.[10:][] | "\(.id) \(.tag_name)"' | while read id tag; do
-            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
-          done
