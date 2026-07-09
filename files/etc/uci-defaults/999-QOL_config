@@ -1,5 +1,10 @@
 uci -q batch << EOI
 
+# Network: fibre WAN is VLAN-tagged (ISP VLAN 10); netifd auto-creates
+# the 802.1q subdevice from the dotted name
+set network.wan.device='eth1.10'
+set network.wan6.device='eth1.10'
+
 # Wireless radio0 specific settings
 set wireless.radio0.htmode='HE20'
 set wireless.radio0.channel='6'
@@ -10,6 +15,7 @@ set wireless.default_radio0.ieee80211w='2'
 set wireless.radio1.htmode='HE80'
 set wireless.radio1.channel='100'
 set wireless.radio1.country='NZ'
+set wireless.radio1.background_radar='1'
 set wireless.default_radio1.ieee80211w='2'
 
 # Firewall settings
@@ -19,6 +25,7 @@ set firewall.@zone[1].forward='DROP'
 # uHTTPd settings
 set uhttpd.main.redirect_https='1'
 
+commit network
 commit wireless
 commit firewall
 commit uhttpd

@@ -2,18 +2,41 @@
 # the system init finished. By default this file does nothing.
 
 # WiFi AQL/FQ-CoDel persist over reboot
-# /root/aql.sh 1500 5000 12000 1200 300
+/root/aql.sh 2500 8000 12000 2048 300 41943040
 
 # SSH hardening
 awk '$5 >= 3071' /etc/ssh/moduli > /etc/ssh/moduli.safe
 mv /etc/ssh/moduli.safe /etc/ssh/moduli
 
 # Wait for WAN interface
+WAN_DEVICE=$(uci -q get network.wan.device)
+[ -z "$WAN_DEVICE" ] && WAN_DEVICE='eth1'
 for i in 1 2 3 4 5; do
-    ip link show eth1 >/dev/null 2>&1 && break
+    ip link show "$WAN_DEVICE" >/dev/null 2>&1 && break
     sleep 1
 done
 
-# Tailscale / UDP GRO optimization
-ethtool -K eth1 rx-gro-list off
-ethtool -K eth1 rx-udp-gro-forwarding on
+# Tailscale / UDP GRO optimization. GRO runs on the physical NIC (before
+# VLAN demux), so the parent device setting is the one that matters. Also
+# try the VLAN WAN device to silence tailscale's health check, but ignore
+# failure — kernels often expose these features as [fixed] on subdevices.
+WAN_PARENT="${WAN_DEVICE%%.*}"
+ethtool -K "$WAN_PARENT" rx-gro-list off
+ethtool -K "$WAN_PARENT" rx-udp-gro-forwarding on
+if [ "$WAN_DEVICE" != "$WAN_PARENT" ]; then
+    ethtool -K "$WAN_DEVICE" rx-gro-list off 2>/dev/null
+    ethtool -K "$WAN_DEVICE" rx-udp-gro-forwarding on 2>/dev/null
+fi
+
+# Reinstall LuCI shadcn theme if missing — on-device apk installs are wiped
+# by every sysupgrade. NOTE: the filename is version-pinned but fetched from
+# the 'latest' release, so this 404s (harmlessly) once upstream ships a
+# newer version; bump the filename then.
+if ! apk list -I 2>/dev/null | grep -q '^luci-theme-shadcn'; then
+    ( cd /tmp \
+        && uclient-fetch -O luci-theme-shadcn.apk https://github.com/eamonxg/luci-theme-shadcn/releases/latest/download/luci-theme-shadcn-0.2.0-r20260621.apk \
+        && apk add --allow-untrusted luci-theme-shadcn.apk \
+        && rm -f luci-theme-shadcn.apk ) \
+        && logger -t rc.local "installed luci-theme-shadcn" \
+        || logger -t rc.local "luci-theme-shadcn install failed"
+fi

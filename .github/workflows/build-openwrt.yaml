@@ -144,7 +144,44 @@ jobs:
           - **Tailscale**
           - **Policy Based Routing**
           - **banIP**
-          - **REMOVED:** odhcp, upnp, iptables, samba, usb storage..." --title "OpenWrt Custom Release for Flint 2 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
+          - **AdguardHome**
+          - **REMOVED:** upnp, iptables, samba, usb storage..." --title "OpenWrt Custom Release for Flint 2 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
+
+      - name: Publish package feeds to feeds branch
+        run: |
+          # The image's distfeeds.list (generated from CONFIG_VERSION_REPO) defines
+          # the exact URLs the firmware will fetch — mirror the built packages to
+          # that location on the 'feeds' branch so apk works for this build's
+          # lifetime (including kmods, which match this exact kernel).
+          DISTFEEDS=$(find build_dir -path '*/root-*/etc/apk/repositories.d/distfeeds.list' | head -n1)
+          [ -f "$DISTFEEDS" ] || { echo "distfeeds.list not found in build tree"; exit 1; }
+          echo "--- generated distfeeds.list ---"; cat "$DISTFEEDS"
+          BUILD_DIR_NAME=$(sed -n 's|.*/heads/feeds/\([^/]*\)/targets/.*|\1|p' "$DISTFEEDS" | head -n1)
+          [ -n "$BUILD_DIR_NAME" ] || { echo "could not derive build dir name from distfeeds.list"; exit 1; }
+
+          git clone --depth 1 --branch feeds "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" feeds_repo 2>/dev/null \
+            || { mkdir feeds_repo && git -C feeds_repo init -b feeds; }
+          cd feeds_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          rm -rf "$BUILD_DIR_NAME"
+          mkdir -p "$BUILD_DIR_NAME/targets/mediatek/filogic"
+          cp -r ../bin/targets/mediatek/filogic/packages "$BUILD_DIR_NAME/targets/mediatek/filogic/"
+          cp -r ../bin/packages "$BUILD_DIR_NAME/"
+
+          # keep only the 3 most recent build dirs (they only serve the firmware
+          # built alongside them — same lifetime as the releases)
+          ls -d */ | sort | head -n -3 | xargs -r rm -rf
+
+          # publish as a single orphan commit and force-push: keeps the branch
+          # history at one commit so the repo never accumulates stale packages
+          git checkout --orphan publish
+          git add -A
+          git commit -m "feeds: ${BUILD_DIR_NAME}"
+          git remote remove origin 2>/dev/null ||:
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push -f origin publish:feeds
 
       - name: Clean up old releases
         run: |
