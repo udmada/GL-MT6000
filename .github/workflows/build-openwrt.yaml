@@ -88,6 +88,38 @@ jobs:
         with:
           path: "builder_repo"
 
+      - name: Compute cache keys
+        id: cachekeys
+        run: |
+          # reusing the toolchain is safe exactly when upstream's tools/ and
+          # toolchain/ trees are byte-identical, so key on their git tree
+          # hashes — unrelated upstream commits still hit, gcc/musl bumps miss
+          echo "toolchain=toolchain-filogic-$(git rev-parse --short=12 HEAD:tools)-$(git rev-parse --short=12 HEAD:toolchain)" >> $GITHUB_OUTPUT
+
+      - name: Cache source downloads
+        uses: actions/cache@v6.1.0
+        with:
+          path: dl
+          # each build only adds a few new tarballs — restore the newest dl
+          # cache, download the delta, save under this run's upstream sha
+          # (contents are hash-verified by make download, so stale is safe)
+          key: dl-${{ needs.check_commits.outputs.latest_commit_sha }}
+          restore-keys: dl-
+
+      - name: Cache tools and toolchain
+        uses: actions/cache@v6.1.0
+        with:
+          # host tools (incl. llvm-bpf) + cross toolchain: ~40-80 min of build
+          # time; OpenWrt's hash-named stamp files make partial reuse safe.
+          # hostpkg is deliberately excluded: its big entries (rust) rebuild
+          # regardless because their build trees are too large to cache
+          path: |
+            staging_dir/host
+            staging_dir/toolchain-*
+            build_dir/host
+            build_dir/toolchain-*
+          key: ${{ steps.cachekeys.outputs.toolchain }}
+
       - name: Update and install feeds
         run: |
           ./scripts/feeds update -a
@@ -166,6 +198,13 @@ jobs:
         with:
           name: package-feeds
           path: feeds_out/
+
+      - name: Prune stale downloads
+        run: |
+          # keep the dl cache entry bounded — tarballs untouched for 30 days
+          # are dropped here, before the cache saves at job end; anything
+          # still needed re-downloads (hash-verified) on a later run
+          find dl -type f -mtime +30 -delete 2>/dev/null ||:
 
   publish_feeds:
     name: Publish package feeds
