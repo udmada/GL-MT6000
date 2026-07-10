@@ -4,6 +4,19 @@ import "@com.github.actions/Step.pkl"
 import "@com.github.actions/catalog.pkl"
 
 import "actions/CacheV6.pkl"
+import "actions/CacheRestoreV6.pkl"
+import "actions/CacheSaveV6.pkl"
+
+// shared between the restore step (before the build) and the explicit save
+// step (right after it) — the save must not wait for job end, or every
+// post-build failure throws the finished toolchain away
+local toolchainCachePaths: Listing<String> = new {
+  "staging_dir/host"
+  "staging_dir/toolchain-*"
+  "build_dir/host"
+  "build_dir/toolchain-*"
+}
+local toolchainCacheKey: String = "${{ steps.cachekeys.outputs.toolchain }}"
 
 name = "Build OpenWrt for GL-MT6000"
 
@@ -143,16 +156,12 @@ jobs {
       // time; OpenWrt's hash-named stamp files make partial reuse safe.
       // hostpkg is deliberately excluded: its big entries (rust) rebuild
       // regardless because their build trees are too large to cache
-      (CacheV6) {
-        name = "Cache tools and toolchain"
+      (CacheRestoreV6) {
+        name = "Restore tools and toolchain cache"
+        id = "toolchain_restore"
         with {
-          pathList {
-            "staging_dir/host"
-            "staging_dir/toolchain-*"
-            "build_dir/host"
-            "build_dir/toolchain-*"
-          }
-          key = "${{ steps.cachekeys.outputs.toolchain }}"
+          pathList = toolchainCachePaths
+          key = toolchainCacheKey
         }
       }
       (Step) {
@@ -202,6 +211,19 @@ jobs {
           cd firmware && sha256sum openwrt-*-sysupgrade.bin >sha256sums ||:
           """#
       }
+      // bank the finished toolchain immediately — the feed/publish steps after
+      // this point are the ones that have historically failed, and the
+      // combined cache action's job-end save would discard it with them.
+      // skipped when the build itself failed (no partial-state poisoning) or
+      // when the key already exists
+      (CacheSaveV6) {
+        name = "Save tools and toolchain cache"
+        `if` = "steps.toolchain_restore.outputs.cache-hit != 'true'"
+        with {
+          pathList = toolchainCachePaths
+          key = toolchainCacheKey
+        }
+      }
       (catalog.`actions/upload-artifact@v7`) {
         name = "Upload artifacts"
         with {
@@ -227,7 +249,10 @@ jobs {
           # populate + index (and sign) the per-target package dir — buildbots
           # run this; a plain 'make' does not
           make package/index
-          TARGET_PKG_DIR=$(ls -d bin/targets/*/*/packages 2>/dev/null | head -n1)
+          # find, not a fixed glob: this fork nests everything under a
+          # versioned dir (bin/<date>_<rev>_<branch>/targets/...), while
+          # vanilla openwrt uses bin/targets/...
+          TARGET_PKG_DIR=$(find bin -type d -path '*/targets/*/*/packages' 2>/dev/null | head -n1)
           [ -d "$TARGET_PKG_DIR" ] || { echo "target packages dir still missing after package/index:"; find bin -maxdepth 5 -type d; exit 1; }
 
           # only the target feed points at this repo — the generated distfeeds
