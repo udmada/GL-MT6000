@@ -1,0 +1,356 @@
+amends "@com.github.actions/Workflow.pkl"
+
+import "@com.github.actions/Step.pkl"
+import "@com.github.actions/catalog.pkl"
+
+import "actions/CacheV6.pkl"
+
+name = "Build OpenWrt for GL-MT6000"
+
+permissions {
+  contents = "write"
+  actions = "write"
+}
+
+// queue runs instead of overlapping — publish_feeds force-pushes the feeds
+// branch, so two concurrent runs would clobber each other's packages
+concurrency {
+  group = "${{ github.workflow }}"
+  `cancel-in-progress` = false
+}
+
+on {
+  workflow_dispatch {}
+  push {
+    branches {
+      "main"
+    }
+  }
+  schedule {
+    new {
+      cron = "38 1 */3 * *"
+    }
+  }
+}
+
+env {
+  ["REMOTE_REPOSITORY"] = "pesa1234/openwrt"
+  ["CONFIG_FILE"] = "mt6000.config"
+  ["GH_TOKEN"] = "${{ github.token }}"
+}
+
+jobs {
+  ["check_commits"] {
+    name = "Check for new commits"
+    `runs-on` = "ubuntu-latest"
+    outputs {
+      ["remote_branch"] = "${{ steps.check_commits.outputs.remote_branch }}"
+      ["release_prefix"] = "${{ steps.check_commits.outputs.release_prefix }}"
+      ["new_commits"] = "${{ steps.check_commits.outputs.new_commits }}"
+      ["latest_commit_sha"] = "${{ steps.check_commits.outputs.latest_commit_sha }}"
+    }
+    steps {
+      (Step) {
+        name = "Check for new commits in pesa1234 repo"
+        id = "check_commits"
+        run = #"""
+          remote_branch=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" | sed -e 's|\(.*heads/\)||' | grep -viE 'test|beta' | sort -V | tail -n1)
+          [ -n "$remote_branch" ] && latest_commit_sha=$(gh api "repos/${{ env.REMOTE_REPOSITORY }}/commits/${remote_branch}" --jq .sha)
+          [ -z "$latest_commit_sha" ] && { echo "*** COULD NOT GET latest_commit_sha FROM remote_branch=$remote_branch ***" ; exit 1; }
+          gh api "repos/${{ github.repository }}/releases/latest" --jq .body 2>/dev/null | grep -q "${latest_commit_sha}" && echo "new_commits=false" >> $GITHUB_OUTPUT || echo "new_commits=true" >> $GITHUB_OUTPUT
+          echo "remote_branch=${remote_branch}"
+          echo "release_prefix=${remote_branch%.rss*}"
+          echo "latest_commit_sha=$latest_commit_sha"
+          echo "remote_branch=${remote_branch}" >> $GITHUB_OUTPUT
+          echo "release_prefix=${remote_branch%.rss*}" >> $GITHUB_OUTPUT
+          echo "latest_commit_sha=$latest_commit_sha" >> $GITHUB_OUTPUT
+          """#
+      }
+    }
+  }
+
+  ["build"] {
+    name = "Build OpenWrt"
+    needs = "check_commits"
+    `if` = "github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true'"
+    `runs-on` = "ubuntu-latest"
+    steps {
+      (Step) {
+        name = "Free up disk space"
+        run = #"""
+          echo "Before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /home/runner/.cache
+          echo "After cleanup:"
+          df -h
+          """#
+      }
+      (Step) {
+        name = "Install dependencies"
+        run = #"""
+          sudo apt remove -y '*firefox*' '*chrome*' '*dotnet*' '*php*'
+          sudo apt update -y && sudo apt upgrade -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
+          sudo apt autoremove -y && sudo apt clean -y
+          """#
+      }
+      (Step) {
+        name = "Restore minimal OpenWrt packaging tools"
+        run = #"""
+          sudo apt update
+          sudo apt install -y perl xz-utils zstd liblzma-dev libzstd-dev
+          """#
+      }
+      (catalog.`actions/checkout@v6`) {
+        name = "Checkout remote repository"
+        with {
+          repository = "${{ env.REMOTE_REPOSITORY }}"
+          ref = "${{ needs.check_commits.outputs.remote_branch }}"
+        }
+      }
+      (catalog.`actions/checkout@v6`) {
+        name = "Checkout current repository"
+        with {
+          path = "builder_repo"
+        }
+      }
+      (Step) {
+        name = "Compute cache keys"
+        id = "cachekeys"
+        // reusing the toolchain is safe exactly when upstream's tools/ and
+        // toolchain/ trees are byte-identical, so key on their git tree
+        // hashes — unrelated upstream commits still hit, gcc/musl bumps miss
+        run = #"""
+          echo "toolchain=toolchain-filogic-$(git rev-parse --short=12 HEAD:tools)-$(git rev-parse --short=12 HEAD:toolchain)" >> $GITHUB_OUTPUT
+          """#
+      }
+      // each build only adds a few new tarballs — restore the newest dl
+      // cache, download the delta, save under this run's upstream sha
+      // (contents are hash-verified by make download, so stale is safe)
+      (CacheV6) {
+        name = "Cache source downloads"
+        with {
+          path = "dl"
+          key = "dl-${{ needs.check_commits.outputs.latest_commit_sha }}"
+          `restore-keys` = "dl-"
+        }
+      }
+      // host tools (incl. llvm-bpf) + cross toolchain: ~40-80 min of build
+      // time; OpenWrt's hash-named stamp files make partial reuse safe.
+      // hostpkg is deliberately excluded: its big entries (rust) rebuild
+      // regardless because their build trees are too large to cache
+      (CacheV6) {
+        name = "Cache tools and toolchain"
+        with {
+          pathList {
+            "staging_dir/host"
+            "staging_dir/toolchain-*"
+            "build_dir/host"
+            "build_dir/toolchain-*"
+          }
+          key = "${{ steps.cachekeys.outputs.toolchain }}"
+        }
+      }
+      (Step) {
+        name = "Update and install feeds"
+        run = #"""
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # run again because sometimes it misses some dependencies
+          ./scripts/feeds install -a
+
+          # FIX LPAC CIRCULAR DEPENDENCY WARNING
+          find feeds -path "*lpac*" -type d -exec rm -rf {} + || true
+          """#
+      }
+      (Step) {
+        name = "Setup configuration and custom files"
+        run = #"""
+          # delete unneeded folders and patch files with repository info
+          rm -frv builder_repo/.git builder_repo/.github
+          for file in $(grep -rl XXXXXX builder_repo/); do echo "Patching: $file"; sed -i 's|XXXXXX/YYYYYY|${{ github.repository }}|g' "$file" || exit 1; done
+          patch -p1 < builder_repo/attendedsysupgrade-with-GitHub.patch
+          mv -v builder_repo/files ./
+          chmod -v 755 files/usr/bin/upgrade_custom_openwrt files/www/cgi-bin/github_* files/root/aql.sh
+          mv -v builder_repo/${{ env.CONFIG_FILE }} .config
+          rm -rfv builder_repo
+          make defconfig
+          """#
+      }
+      (Step) {
+        name = "Build firmware"
+        run = #"""
+          make download -j$(nproc) || {
+            echo "Retrying..."
+            sleep 60
+            make download -j1 V=s
+          }
+          make -j$(nproc) || {
+            echo "Retrying..."
+            sleep 60
+            make -j1 V=s
+          }
+          mkdir -p firmware
+          find ./bin -type f \( -iname 'openwrt-*-sysupgrade.bin' -or -iname 'config.buildinfo' -or -iname 'version.buildinfo' \) -exec mv -v {} ./firmware/ \; ||:
+          # fail here rather than shipping a release without a flashable image
+          ls firmware/openwrt-*-sysupgrade.bin >/dev/null || { echo "no sysupgrade image produced"; exit 1; }
+          cp .config firmware/full.config ||:
+          cd firmware && sha256sum openwrt-*-sysupgrade.bin >sha256sums ||:
+          """#
+      }
+      (catalog.`actions/upload-artifact@v7`) {
+        name = "Upload artifacts"
+        with {
+          name = "gl-mt6000-firmware"
+          path = "firmware/*"
+        }
+      }
+      (Step) {
+        name = "Prepare package feeds"
+        run = #"""
+          # The image's distfeeds.list (generated from CONFIG_VERSION_REPO) defines
+          # the exact URLs the firmware will fetch — collect the built packages
+          # under that path and hand them to the publish job as an artifact.
+          DISTFEEDS=$(find build_dir -path '*/root-*/etc/apk/repositories.d/distfeeds.list' | head -n1)
+          [ -f "$DISTFEEDS" ] || { echo "distfeeds.list not found in build tree"; exit 1; }
+          echo "--- generated distfeeds.list ---"; cat "$DISTFEEDS"
+          # derive the repo-relative feed path (<build_dir>/targets/<target>/<subtarget>/packages)
+          # straight from the URL so the published layout always matches what
+          # the image fetches
+          FEED_PATH=$(sed -n 's|.*/heads/feeds/\(.*\)/packages\.adb$|\1|p' "$DISTFEEDS" | head -n1)
+          [ -n "$FEED_PATH" ] || { echo "could not derive feed path from distfeeds.list"; exit 1; }
+
+          # populate + index (and sign) the per-target package dir — buildbots
+          # run this; a plain 'make' does not
+          make package/index
+          TARGET_PKG_DIR=$(ls -d bin/targets/*/*/packages 2>/dev/null | head -n1)
+          [ -d "$TARGET_PKG_DIR" ] || { echo "target packages dir still missing after package/index:"; find bin -maxdepth 5 -type d; exit 1; }
+
+          # only the target feed points at this repo — the generated distfeeds
+          # keeps arch feeds (base/luci/packages/...) on official snapshots,
+          # so bin/packages does not need mirroring
+          mkdir -p "feeds_out/$(dirname "$FEED_PATH")"
+          cp -r "$TARGET_PKG_DIR" "feeds_out/$FEED_PATH"
+          """#
+      }
+      (catalog.`actions/upload-artifact@v7`) {
+        name = "Upload package feeds artifact"
+        with {
+          name = "package-feeds"
+          path = "feeds_out/"
+        }
+      }
+      (Step) {
+        name = "Prune stale downloads"
+        run = #"""
+          # keep the dl cache entry bounded — tarballs untouched for 30 days
+          # are dropped here, before the cache saves at job end; anything
+          # still needed re-downloads (hash-verified) on a later run
+          find dl -type f -mtime +30 -delete 2>/dev/null ||:
+          """#
+      }
+    }
+  }
+
+  ["publish_feeds"] {
+    name = "Publish package feeds"
+    needs = "build"
+    `runs-on` = "ubuntu-latest"
+    steps {
+      (catalog.`actions/download-artifact@v8`) {
+        name = "Download package feeds artifact"
+        with {
+          name = "package-feeds"
+          path = "feeds_out"
+        }
+      }
+      (Step) {
+        name = "Push to feeds branch"
+        run = #"""
+          BUILD_DIR_NAME=$(ls feeds_out | head -n1)
+          [ -n "$BUILD_DIR_NAME" ] || { echo "empty package-feeds artifact"; exit 1; }
+
+          git clone --depth 1 --branch feeds "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" feeds_repo 2>/dev/null \
+            || { mkdir feeds_repo && git -C feeds_repo init -b feeds; }
+          cd feeds_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          rm -rf "$BUILD_DIR_NAME"
+          cp -r "../feeds_out/$BUILD_DIR_NAME" .
+
+          # keep only the 3 most recent build dirs — covers the releases users
+          # realistically run; older releases still boot fine but can no longer
+          # install extra packages from their (removed) target feed
+          ls -d */ | sort | head -n -3 | xargs -r rm -rf
+
+          # publish as a single orphan commit and force-push: keeps the branch
+          # history at one commit so the repo never accumulates stale packages
+          git checkout --orphan publish
+          git add -A
+          git commit -m "feeds: ${BUILD_DIR_NAME}"
+          git remote remove origin 2>/dev/null ||:
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git push -f origin publish:feeds
+          """#
+      }
+    }
+  }
+
+  ["release"] {
+    name = "Create release"
+    // release only after the package feeds are actually live: a release whose
+    // distfeeds URL 404s would also pin check_commits' sha-gate and stop
+    // scheduled runs from retrying the failed publish
+    needs {
+      "check_commits"
+      "build"
+      "publish_feeds"
+    }
+    `runs-on` = "ubuntu-latest"
+    steps {
+      (catalog.`actions/download-artifact@v8`) {
+        name = "Download firmware artifact"
+        with {
+          name = "gl-mt6000-firmware"
+          path = "firmware"
+        }
+      }
+      (Step) {
+        name = "Create release"
+        run = #"""
+          RELEASE_DATE=$(date +%F)
+          gh release delete "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
+          gh release create "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --repo "${{ github.repository }}" --latest --notes "### 🔄 Main Repository
+          - **Repository:** [${{ env.REMOTE_REPOSITORY }}](https://github.com/${{ env.REMOTE_REPOSITORY }})
+          - **Branch:** ${{ needs.check_commits.outputs.remote_branch }}
+          - **Commit:** [${{ needs.check_commits.outputs.latest_commit_sha }}](https://github.com/${{ env.REMOTE_REPOSITORY }}/tree/${{ needs.check_commits.outputs.latest_commit_sha }})
+
+          ### 📝 Build Information
+          - **Target:** [Flint 2 (GL-MT6000)](https://openwrt.org/toh/gl.inet/gl-mt6000)
+          - **Configuration:** [${{ env.CONFIG_FILE }}](${{ env.CONFIG_FILE }})
+          - **WiFi UCODE scripts**
+          - **Wireguard VPN**
+          - **Tailscale**
+          - **Policy Based Routing**
+          - **banIP**
+          - **AdguardHome**
+          - **REMOVED:** upnp, iptables, samba, usb storage..." --title "OpenWrt Custom Release for Flint 2 (${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE})" firmware/*
+          """#
+      }
+      (Step) {
+        name = "Clean up old releases"
+        run = #"""
+          # keep the 10 most recent releases, delete everything older
+          gh api repos/${{ github.repository }}/releases | jq -r '.[10:][] | "\(.id) \(.tag_name)"' | while read id tag; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
+          done
+          """#
+      }
+    }
+  }
+}

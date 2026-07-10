@@ -6,6 +6,7 @@
 # Editors / IDEs
 .idea/
 .vscode/
+.pkl-lsp/
 *.swp
 *.swo
 *~

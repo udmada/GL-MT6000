@@ -1,0 +1,6 @@
+[tools]
+pkl = "latest"
+
+[tasks."pkl:gen"]
+description = "Generate GitHub Actions YAML from pkl sources"
+run = "pkl eval -m .github/ --project-dir .github/pkl .github/pkl/index.pkl"

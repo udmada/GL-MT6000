@@ -1,0 +1,6 @@
+amends "@pkl.github.dependabotManagedActions/DependabotManagedActions.pkl"
+
+workflows {
+  ["workflows/build-openwrt.yaml"] = import("build-openwrt.pkl")
+  ["workflows/pkl-check.yml"] = import("pkl-check.pkl")
+}
