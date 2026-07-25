@@ -115,6 +115,34 @@ jobs:
         mv -v builder_repo/${{ env.CONFIG_FILE }} .config
         rm -rfv builder_repo
         make defconfig
+    - name: Provision apk feed signing key
+      env:
+        APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+      run: |-
+        # Pin a stable signing keypair so the public key baked into the image
+        # (/etc/apk/keys/public-key.pem) always matches the key that signs
+        # packages.adb — without this the router reports "UNTRUSTED signature",
+        # because OpenWrt otherwise generates a throwaway key per build and the
+        # image half and the feed-signing half can diverge. OpenWrt reads
+        # $(TOPDIR)/{private,public}-key.pem and only generates them when
+        # absent, so writing them here pins both `make` (image) and
+        # `make package/index` (feed) to this one committed key.
+        [ -n "$APK_SIGN_KEY" ] || { echo "APK_SIGN_KEY secret is empty"; exit 1; }
+        printf '%s\n' "$APK_SIGN_KEY" > private-key.pem
+        chmod 600 private-key.pem
+        # the public half is the committed overlay key; fail loudly if it no
+        # longer corresponds to the private key (e.g. the secret was rotated
+        # but files/etc/apk/keys/public-key.pem was not), which would silently
+        # reintroduce the signature mismatch
+        cp files/etc/apk/keys/public-key.pem public-key.pem
+        openssl ec -in private-key.pem -pubout 2>/dev/null > derived-pub.pem
+        if ! cmp -s derived-pub.pem public-key.pem; then
+          echo "committed public-key.pem does not match the APK_SIGN_KEY secret"
+          exit 1
+        fi
+        rm -f derived-pub.pem
+        echo "apk signing key pinned; DER SHA-256:"
+        openssl pkey -pubin -in public-key.pem -outform DER 2>/dev/null | sha256sum
     - name: Build firmware
       run: |-
         make download -j$(nproc) || {

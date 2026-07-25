@@ -1,11 +1,11 @@
 amends "@com.github.actions/Workflow.pkl"
 
-import "@com.github.actions/Step.pkl"
 import "@com.github.actions/catalog.pkl"
+import "@com.github.actions/Step.pkl"
 
-import "actions/CacheV6.pkl"
 import "actions/CacheRestoreV6.pkl"
 import "actions/CacheSaveV6.pkl"
+import "actions/CacheV6.pkl"
 
 // shared between the restore step (before the build) and the explicit save
 // step (right after it) — the save must not wait for job end, or every
@@ -66,7 +66,8 @@ jobs {
       (Step) {
         name = "Check for new commits in pesa1234 repo"
         id = "check_commits"
-        run = #"""
+        run =
+          #"""
           remote_branch=$(git ls-remote https://github.com/${{ env.REMOTE_REPOSITORY }}.git "refs/heads/next-*" | sed -e 's|\(.*heads/\)||' | grep -viE 'test|beta' | sort -V | tail -n1)
           [ -n "$remote_branch" ] && latest_commit_sha=$(gh api "repos/${{ env.REMOTE_REPOSITORY }}/commits/${remote_branch}" --jq .sha)
           [ -z "$latest_commit_sha" ] && { echo "*** COULD NOT GET latest_commit_sha FROM remote_branch=$remote_branch ***" ; exit 1; }
@@ -85,12 +86,14 @@ jobs {
   ["build"] {
     name = "Build OpenWrt"
     needs = "check_commits"
-    `if` = "github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true'"
+    `if` =
+      "github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true'"
     `runs-on` = "ubuntu-latest"
     steps {
       (Step) {
         name = "Free up disk space"
-        run = #"""
+        run =
+          #"""
           echo "Before cleanup:"
           df -h
           sudo rm -rf /usr/share/dotnet
@@ -104,7 +107,8 @@ jobs {
       }
       (Step) {
         name = "Install dependencies"
-        run = #"""
+        run =
+          #"""
           sudo apt remove -y '*firefox*' '*chrome*' '*dotnet*' '*php*'
           sudo apt update -y && sudo apt upgrade -y
           sudo apt install -y build-essential clang flex bison g++ gawk gettext libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget llvm
@@ -113,7 +117,8 @@ jobs {
       }
       (Step) {
         name = "Restore minimal OpenWrt packaging tools"
-        run = #"""
+        run =
+          #"""
           sudo apt update
           sudo apt install -y perl xz-utils zstd liblzma-dev libzstd-dev
           """#
@@ -137,7 +142,8 @@ jobs {
         // reusing the toolchain is safe exactly when upstream's tools/ and
         // toolchain/ trees are byte-identical, so key on their git tree
         // hashes — unrelated upstream commits still hit, gcc/musl bumps miss
-        run = #"""
+        run =
+          #"""
           echo "toolchain=toolchain-filogic-$(git rev-parse --short=12 HEAD:tools)-$(git rev-parse --short=12 HEAD:toolchain)" >> $GITHUB_OUTPUT
           """#
       }
@@ -166,7 +172,8 @@ jobs {
       }
       (Step) {
         name = "Update and install feeds"
-        run = #"""
+        run =
+          #"""
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           # run again because sometimes it misses some dependencies
@@ -178,7 +185,8 @@ jobs {
       }
       (Step) {
         name = "Setup configuration and custom files"
-        run = #"""
+        run =
+          #"""
           # delete unneeded folders and patch files with repository info
           rm -frv builder_repo/.git builder_repo/.github
           for file in $(grep -rl XXXXXX builder_repo/); do echo "Patching: $file"; sed -i 's|XXXXXX/YYYYYY|${{ github.repository }}|g' "$file" || exit 1; done
@@ -191,8 +199,42 @@ jobs {
           """#
       }
       (Step) {
+        name = "Provision apk feed signing key"
+        env {
+          ["APK_SIGN_KEY"] = "${{ secrets.APK_SIGN_KEY }}"
+        }
+        run =
+          #"""
+          # Pin a stable signing keypair so the public key baked into the image
+          # (/etc/apk/keys/public-key.pem) always matches the key that signs
+          # packages.adb — without this the router reports "UNTRUSTED signature",
+          # because OpenWrt otherwise generates a throwaway key per build and the
+          # image half and the feed-signing half can diverge. OpenWrt reads
+          # $(TOPDIR)/{private,public}-key.pem and only generates them when
+          # absent, so writing them here pins both `make` (image) and
+          # `make package/index` (feed) to this one committed key.
+          [ -n "$APK_SIGN_KEY" ] || { echo "APK_SIGN_KEY secret is empty"; exit 1; }
+          printf '%s\n' "$APK_SIGN_KEY" > private-key.pem
+          chmod 600 private-key.pem
+          # the public half is the committed overlay key; fail loudly if it no
+          # longer corresponds to the private key (e.g. the secret was rotated
+          # but files/etc/apk/keys/public-key.pem was not), which would silently
+          # reintroduce the signature mismatch
+          cp files/etc/apk/keys/public-key.pem public-key.pem
+          openssl ec -in private-key.pem -pubout 2>/dev/null > derived-pub.pem
+          if ! cmp -s derived-pub.pem public-key.pem; then
+            echo "committed public-key.pem does not match the APK_SIGN_KEY secret"
+            exit 1
+          fi
+          rm -f derived-pub.pem
+          echo "apk signing key pinned; DER SHA-256:"
+          openssl pkey -pubin -in public-key.pem -outform DER 2>/dev/null | sha256sum
+          """#
+      }
+      (Step) {
         name = "Build firmware"
-        run = #"""
+        run =
+          #"""
           make download -j$(nproc) || {
             echo "Retrying..."
             sleep 60
@@ -233,7 +275,8 @@ jobs {
       }
       (Step) {
         name = "Prepare package feeds"
-        run = #"""
+        run =
+          #"""
           # The image's distfeeds.list (generated from CONFIG_VERSION_REPO) defines
           # the exact URLs the firmware will fetch — collect the built packages
           # under that path and hand them to the publish job as an artifact.
@@ -271,7 +314,8 @@ jobs {
       }
       (Step) {
         name = "Prune stale downloads"
-        run = #"""
+        run =
+          #"""
           # keep the dl cache entry bounded — tarballs untouched for 30 days
           # are dropped here, before the cache saves at job end; anything
           # still needed re-downloads (hash-verified) on a later run
@@ -295,7 +339,8 @@ jobs {
       }
       (Step) {
         name = "Push to feeds branch"
-        run = #"""
+        run =
+          #"""
           BUILD_DIR_NAME=$(ls feeds_out | head -n1)
           [ -n "$BUILD_DIR_NAME" ] || { echo "empty package-feeds artifact"; exit 1; }
 
@@ -347,7 +392,8 @@ jobs {
       }
       (Step) {
         name = "Create release"
-        run = #"""
+        run =
+          #"""
           RELEASE_DATE=$(date +%F)
           gh release delete "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --cleanup-tag -y --repo "${{ github.repository }}" ||:
           gh release create "${{ needs.check_commits.outputs.release_prefix }}-${RELEASE_DATE}" --repo "${{ github.repository }}" --latest --notes "### 🔄 Main Repository
@@ -369,7 +415,8 @@ jobs {
       }
       (Step) {
         name = "Clean up old releases"
-        run = #"""
+        run =
+          #"""
           # keep the 10 most recent releases, delete everything older
           gh api repos/${{ github.repository }}/releases | jq -r '.[10:][] | "\(.id) \(.tag_name)"' | while read id tag; do
             gh api -X DELETE "repos/${{ github.repository }}/releases/$id" && gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null ||:
