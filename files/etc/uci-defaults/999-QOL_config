@@ -5,6 +5,27 @@ uci -q batch << EOI
 set network.wan.device='eth1.10'
 set network.wan6.device='eth1.10'
 
+# Packet steering off. The mtk_eth_soc driver already spreads RX softirq work
+# across all four cores through its hardware queues; enabling netifd steering
+# instead gave every eth1 RX queue an rps_cpus mask of 1 (CPU0 only), the exact
+# opposite of the intent. With flow offloading on, the CPU never sees most
+# forwarded packets anyway.
+set network.globals.packet_steering='0'
+
+# Flow offloading, including hardware (PPE). Safe here because pbr is disabled
+# and SQM is unused - the fast path bypasses both. Forwarded throughput measured
+# 866-880 Mbps multi-stream with the cores near idle.
+set firewall.@defaults[0].flow_offloading='1'
+set firewall.@defaults[0].flow_offloading_hw='1'
+
+# Deliberately no SQM. Measured 2026-08-06 on this line (2.5G handoff, ONT
+# provisioned 1100/1100 symmetric): saturating the WAN unshaped in both
+# directions held latency at ~9 ms max against a ~3 ms idle baseline, so the
+# ISP has no bufferbloat to correct. Shaping cost 38% of download throughput
+# (866 -> 547 Mbps) and made peak latency worse (9.6 -> 23.8 ms), and it forces
+# hardware flow offload off. Re-measure before enabling it; cake's active
+# shaping ceiling on this SoC is ~550 Mbps, since the shaper runs on one core.
+
 # Wireless radio0 specific settings
 set wireless.radio0.htmode='HE20'
 set wireless.radio0.channel='6'
